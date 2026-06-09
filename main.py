@@ -115,16 +115,20 @@ def parse_kestrel_output(text: str) -> dict:
 
     # ── Overall score ──
     score_match = re.search(r'Governance Score[:\s]+(\d+)', text, re.IGNORECASE)
+    if not score_match:
+        score_match = re.search(r'Overall(?:\s+Average|\s+Score)?\s*\|\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+    if not score_match:
+        score_match = re.search(r'Overall(?:\s+Average|\s+Score)?[:\s]+(\d+(?:\.\d+)?)', text, re.IGNORECASE)
     if score_match:
-        result["overall_score"] = int(score_match.group(1))
+        result["overall_score"] = int(round(float(score_match.group(1))))
 
     # ── Verdict ──
-    verdict_match = re.search(r'Verdict[:\s]+(APPROVE WITH CONDITIONS|APPROVE|REJECT)', text, re.IGNORECASE)
+    verdict_match = re.search(r'(?:Final Governance Decision|Overall Governance Verdict|Verdict)[:\s#*]+(APPROVE WITH CONTROLS|ACCEPT WITH CONTROLS|APPROVE WITH CONDITIONS|APPROVE|ACCEPT|REJECT|PASS|FAIL)', text, re.IGNORECASE)
     if verdict_match:
         v = verdict_match.group(1).upper()
-        if "WITH CONDITIONS" in v:
+        if "CONTROLS" in v or "CONDITIONS" in v:
             result["verdict"] = "APPROVE WITH CONDITIONS"
-        elif "APPROVE" in v:
+        elif v in ["APPROVE", "ACCEPT", "PASS"]:
             result["verdict"] = "APPROVE"
         else:
             result["verdict"] = "REJECT"
@@ -151,47 +155,40 @@ def parse_kestrel_output(text: str) -> dict:
         if not none_identified:
             result["non_negotiable_fails"] = [f.strip() for f in fails if f.strip()]
 
-    # ── Domain scores from table ──
+    # ── Domain scores from Kestrel score table ──
     domain_map = {
         "Ethics":       {"id": "ethics",       "au_ref": "AU Ethics Principles 1-8, AI6 Practices",       "nist": "GOVERN, MAP"},
         "Risk":         {"id": "risk",          "au_ref": "NIST AI RMF — GOVERN, MAP, MEASURE, MANAGE",   "nist": "MAP, MEASURE"},
-        "Security":     {"id": "security",      "au_ref": "OWASP LLM Top 10, ACSC May 2026",              "nist": "MANAGE"},
+        "Security":     {"id": "security",      "au_ref": "OWASP LLM Top 10, ACSC Agentic AI Guidance",   "nist": "MANAGE"},
         "Architecture": {"id": "architecture",  "au_ref": "AIP-01 to AIP-12, G0-G5 Autonomy Gates",       "nist": "GOVERN, MANAGE"},
     }
 
-    table_match = re.search(r'\|.*Domain.*\|.*Score.*\|.*Status.*\|(.*?)(?=\*\*Governance Score|\Z)', text, re.DOTALL | re.IGNORECASE)
-    if table_match:
-        table_text = table_match.group(1)
-        for domain, meta in domain_map.items():
-            row = re.search(
-                rf'\|\s*{domain}\s*\|\s*(\d+)/100\s*\|\s*([🟢🟡🔴][^\|]+)\|',
-                table_text, re.IGNORECASE
-            )
-            if row:
-                score = int(row.group(1))
-                status_raw = row.group(2).strip()
-                if "🟢" in status_raw or "green" in status_raw.lower():
-                    verdict = "PASS"
-                elif "🟡" in status_raw or "amber" in status_raw.lower():
-                    verdict = "APPROVE WITH CONDITIONS"
-                else:
-                    verdict = "REJECT"
+    for domain, meta in domain_map.items():
+        row = re.search(rf'\|\s*{domain}\s*\|\s*(\d+(?:\.\d+)?)\s*\|\s*([^\|]+)\|', text, re.IGNORECASE)
+        if row:
+            score = int(round(float(row.group(1))))
+            notes = row.group(2).strip()
+            if score >= 85:
+                verdict = "PASS"
+            elif score >= 70:
+                verdict = "APPROVE WITH CONDITIONS"
+            else:
+                verdict = "REJECT"
 
-                # extract domain-specific findings from the body text
-                findings = extract_domain_findings(text, domain)
-                rec = extract_domain_recommendation(text, domain)
+            findings = extract_domain_findings(text, domain)
+            rec = extract_domain_recommendation(text, domain)
 
-                result["pillars"].append({
-                    "id":             meta["id"],
-                    "name":           domain,
-                    "score":          score,
-                    "verdict":        verdict,
-                    "au_ref":         meta["au_ref"],
-                    "nist":           meta["nist"],
-                    "summary":        f"{domain} assessment — score {score}/100",
-                    "findings":       findings,
-                    "recommendation": rec
-                })
+            result["pillars"].append({
+                "id":             meta["id"],
+                "name":           domain,
+                "score":          score,
+                "verdict":        verdict,
+                "au_ref":         meta["au_ref"],
+                "nist":           meta["nist"],
+                "summary":        f"{domain} assessment — score {score}/100. {notes}",
+                "findings":       findings,
+                "recommendation": rec
+            })
 
     # ── Fallback summary ──
     score = result["overall_score"]
@@ -235,14 +232,134 @@ def extract_domain_recommendation(text: str, domain: str) -> str:
     return f"Review {domain} findings and implement required controls before deployment."
 
 
+# ── Stream / workflow output extraction ───────────────────────────────────────
+def _to_dict_safe(obj):
+    """Convert SDK objects to dict when possible."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "model_dump"):
+        try:
+            return obj.model_dump()
+        except Exception:
+            pass
+    if hasattr(obj, "as_dict"):
+        try:
+            return obj.as_dict()
+        except Exception:
+            pass
+    return None
+
+
+def _extract_messages_from_payload(payload) -> list[str]:
+    """
+    Recursively find Foundry workflow agent output messages.
+    This handles structures like:
+    attributes.output.messages[0]
+    """
+    found = []
+
+    if payload is None:
+        return found
+
+    payload_dict = _to_dict_safe(payload)
+    if payload_dict is not None:
+        payload = payload_dict
+
+    if isinstance(payload, str):
+        return found
+
+    if isinstance(payload, list):
+        for item in payload:
+            found.extend(_extract_messages_from_payload(item))
+        return found
+
+    if isinstance(payload, dict):
+        output = payload.get("output")
+        if isinstance(output, dict):
+            messages = output.get("messages")
+            if isinstance(messages, list):
+                found.extend(str(m) for m in messages if m)
+
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            # Only keep long text/report-like messages, avoid small internal metadata strings.
+            for m in messages:
+                if isinstance(m, str) and len(m.strip()) > 50:
+                    found.append(m)
+
+        for value in payload.values():
+            if isinstance(value, (dict, list)):
+                found.extend(_extract_messages_from_payload(value))
+
+        return found
+
+    # Object fallback
+    attrs = getattr(payload, "attributes", None)
+    if attrs is not None:
+        found.extend(_extract_messages_from_payload(attrs))
+
+    output = getattr(payload, "output", None)
+    if output is not None:
+        found.extend(_extract_messages_from_payload(output))
+
+    item = getattr(payload, "item", None)
+    if item is not None:
+        found.extend(_extract_messages_from_payload(item))
+
+    return found
+
+
+def extract_stream_text(stream) -> str:
+    """
+    Extract final text from Foundry Responses stream.
+
+    Supports both:
+    1. Normal response text delta events
+    2. Workflow agent output messages such as:
+       attributes.output.messages[0]
+    """
+    text_chunks = []
+    agent_outputs = []
+
+    for event in stream:
+        event_type = str(getattr(event, "type", ""))
+
+        # Normal Responses API text streaming
+        if event_type == "response.output_text.delta" or event_type.endswith("RESPONSE_OUTPUT_TEXT_DELTA"):
+            delta = getattr(event, "delta", "")
+            if delta:
+                text_chunks.append(str(delta))
+
+        elif event_type == "response.output_text.done" or event_type.endswith("RESPONSE_OUTPUT_TEXT_DONE"):
+            text = getattr(event, "text", "")
+            if text and not text_chunks:
+                text_chunks.append(str(text))
+
+        # Workflow / agent action output
+        found_messages = _extract_messages_from_payload(event)
+        if found_messages:
+            agent_outputs.extend(found_messages)
+
+    if text_chunks:
+        return "".join(text_chunks).strip()
+
+    # The final orchestrator message is expected to be the last meaningful agent output.
+    if agent_outputs:
+        return agent_outputs[-1].strip()
+
+    return ""
+
+
 # ── Main audit endpoint ───────────────────────────────────────────────────────
 @app.post("/audit", response_model=AuditResponse)
 async def run_audit(req: AuditRequest):
 
-    if not PROJECT_ENDPOINT or not AGENT_ID:
+    if not PROJECT_ENDPOINT:
         raise HTTPException(
             status_code=500,
-            detail="Server misconfigured: AZURE_AI_PROJECT_ENDPOINT or KESTREL_AGENT_ID not set. Check App Service environment variables."
+            detail="Server misconfigured: AZURE_AI_PROJECT_ENDPOINT is not set."
         )
 
     if not req.agent_content or len(req.agent_content.strip()) < 20:
@@ -258,7 +375,7 @@ async def run_audit(req: AuditRequest):
 
         # ── Build prompt ──
         user_message = build_kestrel_prompt(req)
-        logger.info(f"Starting audit — agent_type={req.agent_type}, pillars={req.pillars}")
+        logger.info(f"Starting audit — workflow=Kestrel-governance-engine, agent_type={req.agent_type}, pillars={req.pillars}")
 
         # ── Call Kestrel governance workflow using Foundry Responses protocol ──
         openai_client = client.get_openai_client()
@@ -278,25 +395,7 @@ async def run_audit(req: AuditRequest):
                 metadata={"x-ms-debug-mode-enabled": "1"},
             )
 
-            raw_text = ""
-
-            for event in stream:
-                event_type = str(getattr(event, "type", ""))
-
-                if event_type == "response.output_text.delta" or event_type.endswith("RESPONSE_OUTPUT_TEXT_DELTA"):
-                    delta = getattr(event, "delta", "")
-                    if delta:
-                        raw_text += str(delta)
-
-                elif event_type == "response.output_text.done" or event_type.endswith("RESPONSE_OUTPUT_TEXT_DONE"):
-                    text = getattr(event, "text", "")
-                    if text and not raw_text:
-                        raw_text += str(text)
-
-                elif hasattr(event, "text") and not raw_text:
-                    text = getattr(event, "text", "")
-                    if text:
-                        raw_text += str(text)
+            raw_text = extract_stream_text(stream)
 
         finally:
             try:
