@@ -72,5 +72,5 @@ jobs:
         id: deploy-to-webapp
         with:
           app-name: 'kestrel-prova-api'
-          slot-name: 'Production'
+          slot-name: 'production'
           
