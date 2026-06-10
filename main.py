@@ -1,31 +1,63 @@
 """
 Kestrel Prova API
-FastAPI backend for Prova AI Governance Inspector
-Receives audit request from frontend → Returns high-fidelity Governance Evaluation Matrix
+FastAPI backend for Prova AI Governance Inspector.
+
+Frontend -> FastAPI /audit -> Azure AI Foundry Kestrel workflow -> Prova JSON response.
+
+Design choices:
+- Fail fast if Foundry does not return valid Prova JSON.
+- Same request/response schema as the current Prova frontend.
+- Uses Managed Identity / DefaultAzureCredential.
 """
 
-import os
 import json
-import re
 import logging
-import random
+import os
+import re
+from typing import Any
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from azure.identity import DefaultAzureCredential
+from azure.ai.projects import AIProjectClient
+
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("kestrel-api")
+logger = logging.getLogger("kestrel-prova-api")
 
-# ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(
-    title="Kestrel Prova API",
-    description="AI Governance Inspector backend — powered by Kestrel Engine",
-    version="1.0.0"
+
+# ── Configuration ────────────────────────────────────────────────────────────
+AZURE_AI_PROJECT_ENDPOINT = os.getenv(
+    "AZURE_AI_PROJECT_ENDPOINT",
+    "https://anirops-kestrel-resource.services.ai.azure.com/api/projects/anirops-kestrel",
 )
 
-# ── CORS — allow only the Prova GitHub Pages frontend ────────────────────────
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://anir-a.github.io").split(",")
+KESTREL_WORKFLOW_NAME = os.getenv(
+    "KESTREL_WORKFLOW_NAME",
+    "Kestrel-governance-engine",
+)
+
+KESTREL_WORKFLOW_VERSION = os.getenv(
+    "KESTREL_WORKFLOW_VERSION",
+    "5",
+)
+
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "https://anir-a.github.io").split(",")
+    if origin.strip()
+]
+
+
+# ── App ──────────────────────────────────────────────────────────────────────
+app = FastAPI(
+    title="Kestrel Prova API",
+    description="AI Governance Inspector backend powered by Azure AI Foundry Kestrel workflow",
+    version="3.0.0",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,12 +67,30 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
-# ── Request / Response models ─────────────────────────────────────────────────
+
+# ── Request / Response models ────────────────────────────────────────────────
 class AuditRequest(BaseModel):
-    agent_content: str          # system prompt or use case description
+    agent_content: str = Field(..., description="AI use case, agent prompt, or system description")
     agent_type: str = "general"
     deploy_context: str = "internal-low"
-    pillars: list[str] = []     # selected governance pillars
+    pillars: list[str] = []
+
+
+class Finding(BaseModel):
+    type: str
+    text: str
+
+
+class Pillar(BaseModel):
+    id: str
+    name: str
+    score: int
+    verdict: str
+    au_ref: str = ""
+    nist: str = ""
+    summary: str
+    findings: list[Finding]
+    recommendation: str
 
 
 class AuditResponse(BaseModel):
@@ -52,152 +102,255 @@ class AuditResponse(BaseModel):
     gate_level: str
     gate_note: str
     non_negotiable_fails: list[str]
-    pillars: list[dict]
-    raw_text: str = ""          # full markdown output for debugging
+    pillars: list[Pillar]
+    raw_text: str = ""
 
 
-# ── Health check ──────────────────────────────────────────────────────────────
+# ── Health check ─────────────────────────────────────────────────────────────
 @app.get("/health")
-def health():
+def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "service": "kestrel-prova-api",
-        "workflow": "Kestrel-governance-engine",
-        "mode": "secured-production-ready"
+        "workflow": KESTREL_WORKFLOW_NAME,
+        "workflow_version": KESTREL_WORKFLOW_VERSION,
+        "mode": "foundry-live",
     }
 
 
-# ── Main audit endpoint ───────────────────────────────────────────────────────
-@app.post("/audit", response_model=AuditResponse)
-async def run_audit(req: AuditRequest):
-    if not req.agent_content or len(req.agent_content.strip()) < 20:
-        raise HTTPException(status_code=400, detail="agent_content too short — paste a full system prompt or use case description.")
+# ── Helpers ─────────────────────────────────────────────────────────────────
+def build_kestrel_prompt(req: AuditRequest) -> str:
+    """
+    Keep the prompt simple. The workflow and orchestrator instructions do the real governance work.
+    This prompt gives the workflow enough structured context.
+    """
+    selected_pillars = ", ".join(req.pillars) if req.pillars else "all applicable governance pillars"
 
-    logger.info(f"Starting audit engine evaluation — agent_type={req.agent_type}, pillars={req.pillars}")
+    return f"""
+Evaluate the following AI use case through the Kestrel Governance Engine.
+
+AI use case / agent description:
+{req.agent_content}
+
+Agent type:
+{req.agent_type}
+
+Deployment context:
+{req.deploy_context}
+
+Requested governance focus:
+{selected_pillars}
+
+Return the final answer using the Prova JSON schema from the Kestrel Orchestrator instructions.
+Return only valid JSON.
+""".strip()
+
+
+def extract_text_from_foundry_response(response: Any) -> str:
+    """
+    Azure AI Foundry response objects can vary slightly by SDK version.
+    This function extracts the final text defensively.
+    """
+
+    # Common convenience property.
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    # Try dictionary conversion.
+    response_dict = None
+    if hasattr(response, "as_dict"):
+        try:
+            response_dict = response.as_dict()
+        except Exception:
+            response_dict = None
+
+    if response_dict is None:
+        try:
+            response_dict = json.loads(json.dumps(response, default=str))
+        except Exception:
+            response_dict = None
+
+    if isinstance(response_dict, dict):
+        # Common Responses API shape:
+        # output -> content -> text
+        texts: list[str] = []
+
+        for item in response_dict.get("output", []) or []:
+            for content in item.get("content", []) or []:
+                if isinstance(content, dict):
+                    text_value = content.get("text")
+                    if isinstance(text_value, str) and text_value.strip():
+                        texts.append(text_value.strip())
+
+        if texts:
+            return "\n".join(texts).strip()
+
+        # Some SDKs expose direct text fields.
+        for key in ("text", "content", "message"):
+            value = response_dict.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    # Fallback string conversion.
+    text = str(response)
+    if text and text.strip():
+        return text.strip()
+
+    return ""
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    """
+    Extract and parse the first JSON object from the model response.
+    Fail fast if no valid JSON is present.
+    """
+    if not text or not text.strip():
+        raise ValueError("Empty response from Kestrel workflow.")
+
+    cleaned = text.strip()
+
+    # Remove accidental markdown fences if the model ever returns them.
+    cleaned = re.sub(r"^```json\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^```\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
 
     try:
-        content_lower = req.agent_content.lower()
-        
-        # Look for compliance indicators in the user's text
-        has_human_in_loop = any(w in content_lower for w in ["human", "verify", "recruiter", "sign-off", "review", "manually"])
-        has_encryption = any(w in content_lower for w in ["secure", "encrypt", "isolated", "vnet", "private", "securely"])
-        has_biases = any(w in content_lower for w in ["resume", "screen", "pull", "rank", "applicant"])
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
 
-        # Dynamically calculate realistic scores based on their actual text metrics
-        ethics_score = 88 if has_human_in_loop else 40
-        risk_score = 82 if not has_biases else 35
-        security_score = 94 if has_encryption else 30
-        architecture_score = 89 if "internal" in req.deploy_context.lower() else 45
+    # Defensive extraction if extra text appears before/after JSON.
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
 
-        # Frontend checkbox selectors send values like "wellbeing", "human", "privacy", "reliability"
-        # We process them and ensure we fill the four main display columns expected by the loop
-        scores_to_average = [ethics_score, risk_score, security_score, architecture_score]
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("Kestrel response did not contain a JSON object.")
 
-        # Sync key entries directly with UI definitions
-        pillar_data_matrix = [
-            {
-                "id": "ethics",
-                "name": "⚖️ Ethics Principles",
-                "score": ethics_score,
-                "verdict": "PASS" if ethics_score >= 85 else "FAIL",
-                "au_ref": "AU Ethics Principles 1-8, AI6 Practices",
-                "nist": "GOVERN, MAP",
-                "summary": "Human-in-the-loop verification mitigates major bias paths effectively." if has_human_in_loop else "Autonomous decision loops require independent oversight validation panels.",
-                "findings": [
-                    {
-                        "type": "good" if has_human_in_loop else "fail",
-                        "text": "Human-centered governance validation active." if has_human_in_loop else "Autonomous profiling skips intermediate control layers."
-                    }
-                ],
-                "recommendation": "Maintain standard continuous logging controls." if ethics_score >= 85 else "Implement strict secondary audit approvals prior to production sync."
+    candidate = cleaned[start : end + 1]
+
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Kestrel returned invalid JSON: {exc}") from exc
+
+
+def validate_prova_payload(data: dict[str, Any]) -> AuditResponse:
+    """
+    Validate the exact response shape expected by the current Prova frontend.
+    Also normalises small optional gaps without inventing scores.
+    """
+
+    required_top_level = [
+        "overall_score",
+        "verdict",
+        "headline",
+        "summary",
+        "exec_summary",
+        "gate_level",
+        "gate_note",
+        "non_negotiable_fails",
+        "pillars",
+    ]
+
+    missing = [key for key in required_top_level if key not in data]
+    if missing:
+        raise ValueError(f"Kestrel JSON missing required fields: {missing}")
+
+    if "raw_text" not in data:
+        data["raw_text"] = ""
+
+    if not isinstance(data.get("pillars"), list) or len(data["pillars"]) == 0:
+        raise ValueError("Kestrel JSON must include a non-empty pillars array.")
+
+    # Ensure fields that the frontend may display are always present.
+    for pillar in data["pillars"]:
+        pillar.setdefault("au_ref", "")
+        pillar.setdefault("nist", "")
+        pillar.setdefault("findings", [])
+        pillar.setdefault("recommendation", "")
+
+    return AuditResponse(**data)
+
+
+def run_foundry_workflow(prompt: str) -> str:
+    """
+    Calls the published Kestrel workflow through Azure AI Foundry.
+    """
+
+    logger.info(
+        "Calling Foundry workflow name=%s version=%s endpoint=%s",
+        KESTREL_WORKFLOW_NAME,
+        KESTREL_WORKFLOW_VERSION,
+        AZURE_AI_PROJECT_ENDPOINT,
+    )
+
+    credential = DefaultAzureCredential()
+
+    project_client = AIProjectClient(
+        endpoint=AZURE_AI_PROJECT_ENDPOINT,
+        credential=credential,
+    )
+
+    with project_client:
+        openai_client = project_client.get_openai_client()
+
+        conversation = openai_client.conversations.create()
+
+        response = openai_client.responses.create(
+            conversation=conversation.id,
+            input=prompt,
+            extra_body={
+                "agent_reference": {
+                    "name": KESTREL_WORKFLOW_NAME,
+                    "version": KESTREL_WORKFLOW_VERSION,
+                }
             },
-            {
-                "id": "risk",
-                "name": "🔍 Risk Assessment",
-                "score": risk_score,
-                "verdict": "PASS" if risk_score >= 85 else "FAIL",
-                "au_ref": "NIST AI RMF — GOVERN, MAP, MEASURE, MANAGE",
-                "nist": "MAP, MEASURE",
-                "summary": "Standard business process automation parameters are documented well." if risk_score > 80 else "Data profile intake pipelines exhibit high processing variance paths without baseline metrics.",
-                "findings": [
-                    {
-                        "type": "good" if risk_score > 80 else "issue",
-                        "text": "Risk maps track clean bounds configuration profiles." if risk_score > 80 else "Intake profiles processing presents un-audited historical drift variance risks."
-                    }
-                ],
-                "recommendation": "Review compliance matrices quarterly." if risk_score >= 85 else "Establish quantitative baseline performance logs immediately."
-            },
-            {
-                "id": "security",
-                "name": "🛡️ Privacy & Security",
-                "score": security_score,
-                "verdict": "PASS" if security_score >= 85 else "FAIL",
-                "au_ref": "OWASP LLM Top 10, ACSC Agentic AI Guidance",
-                "nist": "MANAGE",
-                "summary": "Data logging and isolated network structures conform to secure monitor baselines." if has_encryption else "Security risk high due to sensitive data access without continuous configuration monitoring.",
-                "findings": [
-                    {
-                        "type": "good" if has_encryption else "fail",
-                        "text": "Virtual network encryption boundaries actively managed." if has_encryption else "Payload data storage mechanisms expose implicit lateral information leakage vulnerabilities."
-                    }
-                ],
-                "recommendation": "Enforce standard identity token key rotation cycles." if security_score >= 85 else "Deploy virtual network proxy controls prior to opening database connectivity."
-            },
-            {
-                "id": "architecture",
-                "name": "🏗️ Architecture Maturity",
-                "score": architecture_score,
-                "verdict": "PASS" if architecture_score >= 85 else "FAIL",
-                "au_ref": "AIP-01 to AIP-12, G0-G5 Autonomy Gates",
-                "nist": "GOVERN, MANAGE",
-                "summary": "Target system maps cleanly inside low-exposure architectural deployment limits." if architecture_score > 80 else "Architecture readiness questionable given missing governance critical controls.",
-                "findings": [
-                    {
-                        "type": "good" if architecture_score > 80 else "issue",
-                        "text": "System components balance compute isolation rules smoothly." if architecture_score > 80 else "Component workflow orchestration paths skip system topology checks."
-                    }
-                ],
-                "recommendation": "Maintain native cloud routing configuration rules." if architecture_score >= 85 else "Re-factor component orchestration logic into verifiable execution graphs."
-            }
-        ]
-
-        overall_score = int(sum(scores_to_average) / len(scores_to_average))
-        
-        if overall_score >= 85:
-            final_verdict = "PASS"
-            headline = "Governance Clearance Granted"
-            summary = f"This AI model deployment configuration satisfies system compliance standards with a score of {overall_score}/100."
-            gate_level = "G1"
-            gate_note = "Low-autonomy sandboxed operation bounds authorized."
-            fails = []
-        elif overall_score >= 70:
-            final_verdict = "APPROVE WITH CONDITIONS"
-            headline = "Conditional Authorization Approved"
-            summary = f"System checks passed conditionally with a score of {overall_score}/100. Secondary human-in-the-loop audit controls are mandatory."
-            gate_level = "G2"
-            gate_note = "Human validation layers must sign off all system outputs."
-            fails = []
-        else:
-            final_verdict = "FAIL"
-            headline = "Governance Evaluation Blocked"
-            summary = f"Critical compliance path failure. Model evaluation score dropped to {overall_score}/100."
-            gate_level = "G4"
-            gate_note = "Autonomous running completely restricted."
-            fails = ["Missing required system human verification loops."]
-
-        return AuditResponse(
-            overall_score=overall_score,
-            verdict=final_verdict,
-            headline=headline,
-            summary=summary,
-            exec_summary=f"Multi-agent governance metrics compiled across active pillars. Evaluation ID: KST-{random.randint(20000, 89999)}",
-            gate_level=gate_level,
-            gate_note=gate_note,
-            non_negotiable_fails=fails,
-            pillars=pillar_data_matrix,
-            raw_text="### Automated Governance Verification Report\nEvaluated text successfully against multi-agent policy rules."
         )
 
-    except Exception as e:
-        logger.error(f"Audit engine execution failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal engine processing error: {str(e)}")
+    return extract_text_from_foundry_response(response)
+
+
+# ── Main audit endpoint ──────────────────────────────────────────────────────
+@app.post("/audit", response_model=AuditResponse)
+async def run_audit(req: AuditRequest) -> AuditResponse:
+    if not req.agent_content or len(req.agent_content.strip()) < 20:
+        raise HTTPException(
+            status_code=400,
+            detail="agent_content too short — paste a full AI use case, system prompt, or agent description.",
+        )
+
+    logger.info(
+        "Starting Kestrel audit. agent_type=%s deploy_context=%s pillars=%s",
+        req.agent_type,
+        req.deploy_context,
+        req.pillars,
+    )
+
+    prompt = build_kestrel_prompt(req)
+
+    try:
+        raw_response = run_foundry_workflow(prompt)
+        logger.info("Received response from Kestrel workflow. Length=%s", len(raw_response))
+
+        data = extract_json_object(raw_response)
+        validated = validate_prova_payload(data)
+
+        logger.info(
+            "Kestrel audit completed. score=%s verdict=%s gate=%s",
+            validated.overall_score,
+            validated.verdict,
+            validated.gate_level,
+        )
+
+        return validated
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        logger.exception("Kestrel audit failed.")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Kestrel workflow failed or returned invalid Prova JSON: {str(exc)}",
+        ) from exc
