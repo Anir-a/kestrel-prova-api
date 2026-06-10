@@ -5,7 +5,6 @@ FastAPI backend for Prova AI Governance Inspector.
 Frontend -> FastAPI /audit -> Azure AI Foundry Kestrel workflow -> Prova JSON response.
 
 Design choices:
-- No fake/local scoring.
 - Fail fast if Foundry does not return valid Prova JSON.
 - Same request/response schema as the current Prova frontend.
 - Uses Managed Identity / DefaultAzureCredential.
@@ -42,8 +41,6 @@ KESTREL_WORKFLOW_NAME = os.getenv(
     "Kestrel-governance-engine",
 )
 
-# Change this in App Service when you publish a new workflow version.
-# For the stable autoSend=true workflow, set this to the published version, e.g. 7.
 KESTREL_WORKFLOW_VERSION = os.getenv(
     "KESTREL_WORKFLOW_VERSION",
     "7",
@@ -60,24 +57,27 @@ ALLOWED_ORIGINS = [
 app = FastAPI(
     title="Kestrel Prova API",
     description="AI Governance Inspector backend powered by Azure AI Foundry Kestrel workflow",
-    version="3.2.0",
+    version="3.2.1",
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["POST", "GET"],
-    allow_headers=["Content-Type"],
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 
 # ── Request / Response models ────────────────────────────────────────────────
 class AuditRequest(BaseModel):
-    agent_content: str = Field(..., description="AI use case, agent prompt, or system description")
+    agent_content: str = Field(
+        ...,
+        description="AI use case, agent prompt, or system description",
+    )
     agent_type: str = "general"
     deploy_context: str = "internal-low"
-    pillars: list[str] = []
+    pillars: list[str] = Field(default_factory=list)
 
 
 class Finding(BaseModel):
@@ -93,8 +93,8 @@ class Pillar(BaseModel):
     au_ref: str = ""
     nist: str = ""
     summary: str
-    findings: list[Finding]
-    recommendation: str
+    findings: list[Finding] = Field(default_factory=list)
+    recommendation: str = ""
 
 
 class AuditResponse(BaseModel):
@@ -105,14 +105,22 @@ class AuditResponse(BaseModel):
     exec_summary: str
     gate_level: str
     gate_note: str
-    non_negotiable_fails: list[str]
+    non_negotiable_fails: list[str] = Field(default_factory=list)
     pillars: list[Pillar]
     raw_text: str = ""
 
 
-# ── Health check ─────────────────────────────────────────────────────────────
+# ── Health checks ────────────────────────────────────────────────────────────
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "service": "kestrel-prova-api",
+    }
+
+
 @app.get("/health")
-def health() -> dict[str, Any]:
+def health():
     return {
         "status": "ok",
         "service": "kestrel-prova-api",
@@ -124,10 +132,6 @@ def health() -> dict[str, Any]:
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 def build_kestrel_prompt(req: AuditRequest) -> str:
-    """
-    Keep the prompt simple. The workflow and orchestrator instructions do the governance work.
-    This only passes structured user context into the workflow.
-    """
     selected_pillars = ", ".join(req.pillars) if req.pillars else "all applicable governance pillars"
 
     return f"""
@@ -151,9 +155,6 @@ Return only valid JSON.
 
 
 def _response_to_dict(response: Any) -> dict[str, Any] | None:
-    """
-    Convert SDK response object to a dict where possible.
-    """
     if hasattr(response, "as_dict"):
         try:
             value = response.as_dict()
@@ -181,28 +182,18 @@ def _response_to_dict(response: Any) -> dict[str, Any] | None:
 
 
 def extract_text_from_foundry_response(response: Any) -> str:
-    """
-    Azure AI Foundry workflow responses may include multiple agent outputs when workflow nodes
-    autoSend their messages. Collect all text blocks and prefer the final block that looks like
-    Prova dashboard JSON.
-    """
-
-    # Common convenience property.
     output_text = getattr(response, "output_text", None)
     if isinstance(output_text, str) and output_text.strip():
-        # Do not immediately trust it as single JSON. It may contain concatenated outputs.
         return output_text.strip()
 
     response_dict = _response_to_dict(response)
     texts: list[str] = []
 
     if isinstance(response_dict, dict):
-        # If Foundry reports a failed workflow response, surface the actual error.
         if response_dict.get("status") == "failed":
             error = response_dict.get("error")
             raise ValueError(f"Foundry workflow response failed: {error}")
 
-        # Common Responses API shape: output -> content -> text
         for item in response_dict.get("output", []) or []:
             if not isinstance(item, dict):
                 continue
@@ -215,7 +206,6 @@ def extract_text_from_foundry_response(response: Any) -> str:
                 if isinstance(text_value, str) and text_value.strip():
                     texts.append(text_value.strip())
 
-        # Prefer the final text block that appears to be the Prova dashboard JSON.
         for text in reversed(texts):
             if '"overall_score"' in text and '"pillars"' in text:
                 return text.strip()
@@ -223,13 +213,11 @@ def extract_text_from_foundry_response(response: Any) -> str:
         if texts:
             return "\n".join(texts).strip()
 
-        # Some SDKs expose direct text fields.
         for key in ("text", "content", "message"):
             value = response_dict.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
 
-    # Last fallback: string conversion.
     text = str(response)
     if text and text.strip():
         return text.strip()
@@ -238,18 +226,11 @@ def extract_text_from_foundry_response(response: Any) -> str:
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
-    """
-    Extract the last valid Prova JSON object from a response.
-
-    This handles the practical Foundry workflow case where intermediate agents autoSend output,
-    resulting in several messages before the final Kestrel Orchestrator JSON.
-    """
     if not text or not text.strip():
         raise ValueError("Empty response from Kestrel workflow.")
 
     cleaned = text.strip()
 
-    # Remove accidental markdown fences if the model ever returns them.
     cleaned = re.sub(r"```json\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"```\s*", "", cleaned)
 
@@ -265,7 +246,6 @@ def extract_json_object(text: str) -> dict[str, Any]:
         "pillars",
     }
 
-    # Try direct parse first.
     try:
         parsed = json.loads(cleaned)
         if isinstance(parsed, dict):
@@ -273,7 +253,6 @@ def extract_json_object(text: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
-    # Scan the whole text and collect every valid JSON object.
     decoder = json.JSONDecoder()
     candidates: list[dict[str, Any]] = []
 
@@ -288,7 +267,6 @@ def extract_json_object(text: str) -> dict[str, Any]:
         if isinstance(parsed, dict):
             candidates.append(parsed)
 
-    # Prefer the last JSON object that matches the Prova schema.
     for candidate in reversed(candidates):
         if required_keys.issubset(candidate.keys()):
             return candidate
@@ -302,11 +280,6 @@ def extract_json_object(text: str) -> dict[str, Any]:
 
 
 def validate_prova_payload(data: dict[str, Any]) -> AuditResponse:
-    """
-    Validate the exact response shape expected by the current Prova frontend.
-    Normalises small optional gaps only. Does not invent scores or verdicts.
-    """
-
     required_top_level = [
         "overall_score",
         "verdict",
@@ -342,10 +315,6 @@ def validate_prova_payload(data: dict[str, Any]) -> AuditResponse:
 
 
 def run_foundry_workflow(prompt: str) -> str:
-    """
-    Calls the published Kestrel workflow through Azure AI Foundry.
-    """
-
     logger.info(
         "Calling Foundry workflow name=%s version=%s endpoint=%s",
         KESTREL_WORKFLOW_NAME,
@@ -370,7 +339,6 @@ def run_foundry_workflow(prompt: str) -> str:
             input=prompt,
             extra_body={
                 "agent_reference": {
-                    # Required by the current Foundry Responses API schema.
                     "type": "agent_reference",
                     "name": KESTREL_WORKFLOW_NAME,
                     "version": KESTREL_WORKFLOW_VERSION,
