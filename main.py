@@ -69,7 +69,8 @@ def health():
         "status": "ok",
         "service": "kestrel-prova-api",
         "foundry_endpoint": PROJECT_ENDPOINT or "NOT SET",
-        "workflow": "Kestrel-governance-engine"
+        "agent_id": AGENT_ID or "NOT SET",
+        "mode": "direct-agent-orchestrator"
     }
 
 
@@ -242,6 +243,13 @@ async def run_audit(req: AuditRequest):
             detail="Server misconfigured: AZURE_AI_PROJECT_ENDPOINT is not set."
         )
 
+    # Use the KESTREL_AGENT_ID env var pointing to your Orchestrator agent asset
+    if not AGENT_ID:
+        raise HTTPException(
+            status_code=500,
+            detail="Server misconfigured: KESTREL_AGENT_ID environment variable is missing."
+        )
+
     if not req.agent_content or len(req.agent_content.strip()) < 20:
         raise HTTPException(status_code=400, detail="agent_content too short — paste a full system prompt or use case description.")
 
@@ -255,103 +263,46 @@ async def run_audit(req: AuditRequest):
 
         # ── Build prompt ──
         user_message = build_kestrel_prompt(req)
-        logger.info(f"Starting audit — workflow=Kestrel-governance-engine, agent_type={req.agent_type}, pillars={req.pillars}")
+        logger.info(f"Starting audit — target_agent={AGENT_ID}, agent_type={req.agent_type}, pillars={req.pillars}")
 
-        # ── Call Kestrel governance workflow using standard non-streaming execution ──
-        openai_client = client.get_openai_client()
-        conversation = openai_client.conversations.create()
+        # ── Create direct Agent thread session context ──
+        thread = client.agents.create_thread()
+        
+        # Append user text content block to the session thread
+        client.agents.create_message(
+            thread_id=thread.id,
+            role="user",
+            content=user_message,
+        )
+        
+        # Dispatch evaluation run targeting the orchestrator agent ID directly
+        run = client.agents.create_and_process_run(
+            thread_id=thread.id,
+            assistant_id=AGENT_ID
+        )
 
-        try:
-            response = openai_client.responses.create(
-                conversation=conversation.id,
-                extra_body={
-                    "agent_reference": {
-                        "name": "Kestrel-governance-engine",
-                        "type": "agent_reference"
-                    }
-                },
-                input=user_message,
-                stream=False, 
-                metadata={"x-ms-debug-mode-enabled": "1"},
-            )
-
-            # ── Direct Key Extraction Fallbacks ──
-            raw_text = ""
-            
-            # 1. Check Azure Foundry Agent Responses context messages list (Primary for workflows)
-            try:
-                if hasattr(response, "choices") and response.choices:
-                    choice = response.choices[0]
-                    if hasattr(choice, "message") and choice.message:
-                        # Dig straight into the agent orchestration message history context
-                        if hasattr(choice.message, "context") and choice.message.context:
-                            context_msgs = getattr(choice.message.context, "messages", [])
-                            if context_msgs and isinstance(context_msgs, list):
-                                # Loop backward to grab what the orchestrator wrote last
-                                for msg in reversed(context_msgs):
-                                    if isinstance(msg, dict) and msg.get("content"):
-                                        raw_text = msg["content"]
-                                        break
-                                    elif hasattr(msg, "content") and msg.content:
-                                        raw_text = str(msg.content)
-                                        break
-                        
-                        # Fallback to standard surface content if available
-                        if not raw_text and choice.message.content:
-                            raw_text = choice.message.content
-            except Exception as context_err:
-                logger.debug(f"Context parsing skipped: {context_err}")
-
-            # 2. Sequential Step Check: Inspect the elements content array directly
-            if not raw_text and hasattr(response, "content") and response.content:
-                if isinstance(response.content, list):
-                    raw_text = "\n".join([block.text for block in response.content if hasattr(block, 'text')])
-                elif isinstance(response.content, str):
-                    raw_text = response.content
-
-            # 3. Dictionary/Vars Check: Inspect deep properties context
-            if not raw_text:
-                try:
-                    resp_dict = response.to_dict() if hasattr(response, "to_dict") else vars(response)
-                    if isinstance(resp_dict, dict):
-                        # Safely walk standard pipeline variables
-                        raw_text = resp_dict.get("properties", {}).get("outputs", {}).get("Local.FinalGovernanceDecision", "")
-                        
-                        if not raw_text:
-                            # Pull from deep dictionary choices context structures
-                            choices_list = resp_dict.get("choices", [])
-                            if choices_list and isinstance(choices_list, list):
-                                msg_obj = choices_list[0].get("message", {})
-                                ctx_msgs = msg_obj.get("context", {}).get("messages", [])
-                                if isinstance(ctx_msgs, list) and ctx_msgs:
-                                    for m in reversed(ctx_msgs):
-                                        if isinstance(m, dict) and m.get("content"):
-                                            raw_text = m["content"]
-                                            break
-                except Exception:
-                    pass
-
-            # 4. Final Last-Resort Fallback: Stringify the response text or attributes
-            if not raw_text and hasattr(response, "text"):
-                raw_text = response.text or ""
-
-        finally:
-            try:
-                openai_client.conversations.delete(conversation_id=conversation.id)
-            except Exception as cleanup_error:
-                logger.warning(f"Conversation cleanup failed: {cleanup_error}")
+        raw_text = ""
+        # Wait for the agent execution to hit full completion state
+        if run.status == "completed":
+            messages = client.agents.list_messages(thread_id=thread.id)
+            # Pull text directly from the primary output index position
+            if messages.data and messages.data[0].content:
+                raw_text = messages.data[0].content[0].text.value or ""
+        else:
+            logger.error(f"Agent assessment run failed with status: {run.status}")
+            raise HTTPException(status_code=502, detail=f"Kestrel core execution aborted with status: {run.status}")
 
         if not raw_text or not raw_text.strip():
-            raise HTTPException(status_code=502, detail="Kestrel returned no assessment.")
+            raise HTTPException(status_code=502, detail="Kestrel returned an empty assessment report string.")
 
         logger.info(f"Kestrel response received — {len(raw_text)} chars")
 
-        # ── Parse into structured JSON ──
+        # ── Parse markdown into structured JSON objects ──
         result = parse_kestrel_output(raw_text)
         return AuditResponse(**result)
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Audit error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Audit error: {str(e)}")
+        logger.error(f"Audit error occurred: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Audit execution trace error: {str(e)}")
