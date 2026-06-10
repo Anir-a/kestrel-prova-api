@@ -278,36 +278,60 @@ async def run_audit(req: AuditRequest):
             # ── Direct Key Extraction Fallbacks ──
             raw_text = ""
             
-            # 1. Primary Check: Try standard choices message extraction
-            if hasattr(response, "choices") and response.choices:
-                if response.choices[0].message and response.choices[0].message.content:
-                    raw_text = response.choices[0].message.content
-            
-            # 2. Sequential Step Check: Inspect the inner elements array (used by Foundry multi-agent runs)
+            # 1. Check Azure Foundry Agent Responses context messages list (Primary for workflows)
+            try:
+                if hasattr(response, "choices") and response.choices:
+                    choice = response.choices[0]
+                    if hasattr(choice, "message") and choice.message:
+                        # Dig straight into the agent orchestration message history context
+                        if hasattr(choice.message, "context") and choice.message.context:
+                            context_msgs = getattr(choice.message.context, "messages", [])
+                            if context_msgs and isinstance(context_msgs, list):
+                                # Loop backward to grab what the orchestrator wrote last
+                                for msg in reversed(context_msgs):
+                                    if isinstance(msg, dict) and msg.get("content"):
+                                        raw_text = msg["content"]
+                                        break
+                                    elif hasattr(msg, "content") and msg.content:
+                                        raw_text = str(msg.content)
+                                        break
+                        
+                        # Fallback to standard surface content if available
+                        if not raw_text and choice.message.content:
+                            raw_text = choice.message.content
+            except Exception as context_err:
+                logger.debug(f"Context parsing skipped: {context_err}")
+
+            # 2. Sequential Step Check: Inspect the elements content array directly
             if not raw_text and hasattr(response, "content") and response.content:
                 if isinstance(response.content, list):
                     raw_text = "\n".join([block.text for block in response.content if hasattr(block, 'text')])
                 elif isinstance(response.content, str):
                     raw_text = response.content
 
-            # 3. Object-to-Dict Check: Check dictionary properties if parsed as a raw object
+            # 3. Dictionary/Vars Check: Inspect deep properties context
             if not raw_text:
                 try:
                     resp_dict = response.to_dict() if hasattr(response, "to_dict") else vars(response)
                     if isinstance(resp_dict, dict):
-                        raw_text = (
-                            resp_dict.get("properties", {})
-                            .get("outputs", {})
-                            .get("Local.FinalGovernanceDecision", "")
-                        )
+                        # Safely walk standard pipeline variables
+                        raw_text = resp_dict.get("properties", {}).get("outputs", {}).get("Local.FinalGovernanceDecision", "")
+                        
                         if not raw_text:
-                            content_list = resp_dict.get("content", [])
-                            if isinstance(content_list, list) and content_list:
-                                raw_text = "\n".join([item.get("text", "") for item in content_list if isinstance(item, dict)])
+                            # Pull from deep dictionary choices context structures
+                            choices_list = resp_dict.get("choices", [])
+                            if choices_list and isinstance(choices_list, list):
+                                msg_obj = choices_list[0].get("message", {})
+                                ctx_msgs = msg_obj.get("context", {}).get("messages", [])
+                                if isinstance(ctx_msgs, list) and ctx_msgs:
+                                    for m in reversed(ctx_msgs):
+                                        if isinstance(m, dict) and m.get("content"):
+                                            raw_text = m["content"]
+                                            break
                 except Exception:
                     pass
 
-            # 4. Final Fallback: Check standard string text representation
+            # 4. Final Last-Resort Fallback: Stringify the response text or attributes
             if not raw_text and hasattr(response, "text"):
                 raw_text = response.text or ""
 
