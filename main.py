@@ -232,126 +232,6 @@ def extract_domain_recommendation(text: str, domain: str) -> str:
     return f"Review {domain} findings and implement required controls before deployment."
 
 
-# ── Stream / workflow output extraction ───────────────────────────────────────
-def _to_dict_safe(obj):
-    """Convert SDK objects to dict when possible."""
-    if obj is None:
-        return None
-    if isinstance(obj, dict):
-        return obj
-    if hasattr(obj, "model_dump"):
-        try:
-            return obj.model_dump()
-        except Exception:
-            pass
-    if hasattr(obj, "as_dict"):
-        try:
-            return obj.as_dict()
-        except Exception:
-            pass
-    return None
-
-
-def _extract_messages_from_payload(payload) -> list[str]:
-    """
-    Recursively find Foundry workflow agent output messages.
-    This handles structures like:
-    attributes.output.messages[0]
-    """
-    found = []
-
-    if payload is None:
-        return found
-
-    payload_dict = _to_dict_safe(payload)
-    if payload_dict is not None:
-        payload = payload_dict
-
-    if isinstance(payload, str):
-        return found
-
-    if isinstance(payload, list):
-        for item in payload:
-            found.extend(_extract_messages_from_payload(item))
-        return found
-
-    if isinstance(payload, dict):
-        output = payload.get("output")
-        if isinstance(output, dict):
-            messages = output.get("messages")
-            if isinstance(messages, list):
-                found.extend(str(m) for m in messages if m)
-
-        messages = payload.get("messages")
-        if isinstance(messages, list):
-            # Only keep long text/report-like messages, avoid small internal metadata strings.
-            for m in messages:
-                if isinstance(m, str) and len(m.strip()) > 50:
-                    found.append(m)
-
-        for value in payload.values():
-            if isinstance(value, (dict, list)):
-                found.extend(_extract_messages_from_payload(value))
-
-        return found
-
-    # Object fallback
-    attrs = getattr(payload, "attributes", None)
-    if attrs is not None:
-        found.extend(_extract_messages_from_payload(attrs))
-
-    output = getattr(payload, "output", None)
-    if output is not None:
-        found.extend(_extract_messages_from_payload(output))
-
-    item = getattr(payload, "item", None)
-    if item is not None:
-        found.extend(_extract_messages_from_payload(item))
-
-    return found
-
-
-def extract_stream_text(stream) -> str:
-    """
-    Extract final text from Foundry Responses stream.
-
-    Supports both:
-    1. Normal response text delta events
-    2. Workflow agent output messages such as:
-       attributes.output.messages[0]
-    """
-    text_chunks = []
-    agent_outputs = []
-
-    for event in stream:
-        event_type = str(getattr(event, "type", ""))
-
-        # Normal Responses API text streaming
-        if event_type == "response.output_text.delta" or event_type.endswith("RESPONSE_OUTPUT_TEXT_DELTA"):
-            delta = getattr(event, "delta", "")
-            if delta:
-                text_chunks.append(str(delta))
-
-        elif event_type == "response.output_text.done" or event_type.endswith("RESPONSE_OUTPUT_TEXT_DONE"):
-            text = getattr(event, "text", "")
-            if text and not text_chunks:
-                text_chunks.append(str(text))
-
-        # Workflow / agent action output
-        found_messages = _extract_messages_from_payload(event)
-        if found_messages:
-            agent_outputs.extend(found_messages)
-
-    if text_chunks:
-        return "".join(text_chunks).strip()
-
-    # The final orchestrator message is expected to be the last meaningful agent output.
-    if agent_outputs:
-        return agent_outputs[-1].strip()
-
-    return ""
-
-
 # ── Main audit endpoint ───────────────────────────────────────────────────────
 @app.post("/audit", response_model=AuditResponse)
 async def run_audit(req: AuditRequest):
@@ -377,12 +257,12 @@ async def run_audit(req: AuditRequest):
         user_message = build_kestrel_prompt(req)
         logger.info(f"Starting audit — workflow=Kestrel-governance-engine, agent_type={req.agent_type}, pillars={req.pillars}")
 
-        # ── Call Kestrel governance workflow using Foundry Responses protocol ──
+        # ── Call Kestrel governance workflow using standard non-streaming execution ──
         openai_client = client.get_openai_client()
         conversation = openai_client.conversations.create()
 
         try:
-            stream = openai_client.responses.create(
+            response = openai_client.responses.create(
                 conversation=conversation.id,
                 extra_body={
                     "agent_reference": {
@@ -391,11 +271,28 @@ async def run_audit(req: AuditRequest):
                     }
                 },
                 input=user_message,
-                stream=True,
+                stream=False, # ➔ Disabled streaming to cleanly pass large multi-line real paragraphs
                 metadata={"x-ms-debug-mode-enabled": "1"},
             )
 
-            raw_text = extract_stream_text(stream)
+            # ── Direct Key Extraction Fallbacks ──
+            raw_text = ""
+            
+            # Primary: Try extracting the standard response model choices content
+            if hasattr(response, "choices") and response.choices:
+                raw_text = response.choices[0].message.content or ""
+            
+            # Secondary Fallback: If it returns as a custom property dictionary object
+            if not raw_text and isinstance(response, dict):
+                raw_text = (
+                    response.get("properties", {})
+                    .get("outputs", {})
+                    .get("Local.FinalGovernanceDecision", "")
+                )
+            
+            # Final Fallback: Attempt string deduction if text field is exposed
+            if not raw_text and hasattr(response, "text"):
+                raw_text = response.text or ""
 
         finally:
             try:
@@ -403,7 +300,7 @@ async def run_audit(req: AuditRequest):
             except Exception as cleanup_error:
                 logger.warning(f"Conversation cleanup failed: {cleanup_error}")
 
-        if not raw_text.strip():
+        if not raw_text or not raw_text.strip():
             raise HTTPException(status_code=502, detail="Kestrel returned no assessment.")
 
         logger.info(f"Kestrel response received — {len(raw_text)} chars")
