@@ -5,6 +5,7 @@ FastAPI backend for Prova AI Governance Inspector.
 Frontend -> FastAPI /audit -> Azure AI Foundry Kestrel workflow -> Prova JSON response.
 
 Design choices:
+- No fake/local scoring.
 - Fail fast if Foundry does not return valid Prova JSON.
 - Same request/response schema as the current Prova frontend.
 - Uses Managed Identity / DefaultAzureCredential.
@@ -56,7 +57,7 @@ ALLOWED_ORIGINS = [
 app = FastAPI(
     title="Kestrel Prova API",
     description="AI Governance Inspector backend powered by Azure AI Foundry Kestrel workflow",
-    version="3.0.0",
+    version="3.1.0",
 )
 
 app.add_middleware(
@@ -172,16 +173,20 @@ def extract_text_from_foundry_response(response: Any) -> str:
             response_dict = None
 
     if isinstance(response_dict, dict):
-        # Common Responses API shape:
-        # output -> content -> text
         texts: list[str] = []
 
+        # Common Responses API shape: output -> content -> text
         for item in response_dict.get("output", []) or []:
+            if not isinstance(item, dict):
+                continue
+
             for content in item.get("content", []) or []:
-                if isinstance(content, dict):
-                    text_value = content.get("text")
-                    if isinstance(text_value, str) and text_value.strip():
-                        texts.append(text_value.strip())
+                if not isinstance(content, dict):
+                    continue
+
+                text_value = content.get("text")
+                if isinstance(text_value, str) and text_value.strip():
+                    texts.append(text_value.strip())
 
         if texts:
             return "\n".join(texts).strip()
@@ -265,6 +270,9 @@ def validate_prova_payload(data: dict[str, Any]) -> AuditResponse:
 
     # Ensure fields that the frontend may display are always present.
     for pillar in data["pillars"]:
+        if not isinstance(pillar, dict):
+            raise ValueError("Each pillar must be a JSON object.")
+
         pillar.setdefault("au_ref", "")
         pillar.setdefault("nist", "")
         pillar.setdefault("findings", [])
@@ -297,11 +305,16 @@ def run_foundry_workflow(prompt: str) -> str:
 
         conversation = openai_client.conversations.create()
 
+        # IMPORTANT:
+        # agent_reference now requires "type".
+        # The Foundry error was:
+        # required: Required properties ["type"] are not present at /agent_reference
         response = openai_client.responses.create(
             conversation=conversation.id,
             input=prompt,
             extra_body={
                 "agent_reference": {
+                    "type": "workflow",
                     "name": KESTREL_WORKFLOW_NAME,
                     "version": KESTREL_WORKFLOW_VERSION,
                 }
