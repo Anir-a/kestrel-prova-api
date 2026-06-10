@@ -314,7 +314,7 @@ def run_foundry_workflow(prompt: str) -> str:
             input=prompt,
             extra_body={
                 "agent_reference": {
-                    "type": "workflow",
+                    "type": "agent_reference",
                     "name": KESTREL_WORKFLOW_NAME,
                     "version": KESTREL_WORKFLOW_VERSION,
                 }
