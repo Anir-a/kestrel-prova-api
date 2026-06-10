@@ -60,14 +60,13 @@ Each agent reasons independently over its domain. The orchestrator collects thei
 
 ## The Autonomy Gate
 
-Every audit ends with a gate assignment. The concept comes from the idea that not every AI system should be trusted with the same level of independence.
+Every audit ends with a gate assignment. Think of it as a clearance level — not every AI system has earned the right to act without supervision.
 
 | Gate | Score | What it means |
 |---|---|---|
-| **G1** | 85 – 100 | Ready to deploy in a supervised environment |
-| **G2** | 70 – 84 | Can run, but a human must review every output before it acts |
-| **G4** | 0 – 69 | Blocked. Fix the critical issues before this goes anywhere near production |
-
+| **G1 — Clear** | 85 – 100 | Governance checks passed. Safe to deploy within assigned infrastructure boundaries. |
+| **G2 — Conditional** | 70 – 84 | Significant risks present. Every single output must be reviewed and signed off by a human before the system acts. Not optional. |
+| **G4 — Blocked** | 0 – 69 | Critical governance failures detected. This agent cannot go to production. Fix the issues flagged in the report first. |
 ---
 
 ## Try it
