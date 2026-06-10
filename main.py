@@ -89,34 +89,39 @@ async def run_audit(req: AuditRequest):
         security_score = 94 if has_encryption else 30
         architecture_score = 89 if "internal" in req.deploy_context.lower() else 45
 
-        active_pillars = req.pillars if req.pillars else ["Ethics", "Risk", "Security", "Architecture"]
+        active_pillars = [p.lower() for p in req.pillars] if req.pillars else ["ethics", "risk", "security", "architecture"]
         scores_to_average = []
         pillar_data_matrix = []
 
+        # FIXED: Lowercase keys to match frontend mapping requirements exactly
         domain_map = {
-            "Ethics": {
+            "ethics": {
                 "id": "ethics",
+                "name": "Ethics",
                 "score": ethics_score,
                 "au_ref": "AU Ethics Principles 1-8, AI6 Practices",
                 "nist": "GOVERN, MAP",
                 "notes": "Human-in-the-loop verification mitigates major bias paths effectively." if has_human_in_loop else "Critical risk identified: Autonomous decision loops require independent oversight validation panels."
             },
-            "Risk": {
+            "risk": {
                 "id": "risk",
+                "name": "Risk",
                 "score": risk_score,
                 "au_ref": "NIST AI RMF — GOVERN, MAP, MEASURE, MANAGE",
                 "nist": "MAP, MEASURE",
                 "notes": "Standard business process automation parameters are documented well." if risk_score > 80 else "Data profile intake pipelines exhibit high processing variance paths without baseline metrics."
             },
-            "Security": {
+            "security": {
                 "id": "security",
+                "name": "Security",
                 "score": security_score,
                 "au_ref": "OWASP LLM Top 10, ACSC Agentic AI Guidance",
                 "nist": "MANAGE",
                 "notes": "Data logging and isolated network structures conform to secure monitor baselines." if has_encryption else "Security risk high due to sensitive data access without continuous configuration monitoring."
             },
-            "Architecture": {
+            "architecture": {
                 "id": "architecture",
+                "name": "Architecture",
                 "score": architecture_score,
                 "au_ref": "AIP-01 to AIP-12, G0-G5 Autonomy Gates",
                 "nist": "GOVERN, MANAGE",
@@ -124,37 +129,35 @@ async def run_audit(req: AuditRequest):
             }
         }
 
-        for pillar_name in ["Ethics", "Risk", "Security", "Architecture"]:
-            if pillar_name in active_pillars:
-                meta = domain_map[pillar_name]
+        for p_key, meta in domain_map.items():
+            if p_key in active_pillars:
                 scores_to_average.append(meta["score"])
-                
-                verdict = "PASS" if meta["score"] >= 85 else "APPROVE WITH CONDITIONS" if meta["score"] >= 70 else "FAIL"
-                status_color = "🟢 Green" if meta["score"] >= 85 else "🟡 Yellow" if meta["score"] >= 70 else "🔴 Red"
+                verdict_str = "PASS" if meta["score"] >= 85 else "FAIL"
                 
                 pillar_data_matrix.append({
                     "id": meta["id"],
-                    "name": pillar_name,
+                    "name": meta["name"],
                     "score": meta["score"],
-                    "verdict": verdict,
-                    "status_color": status_color,
+                    "verdict": verdict_str,
                     "au_ref": meta["au_ref"],
                     "nist": meta["nist"],
-                    "summary": f"{pillar_name} validation complete — score {meta['score']}/100. {meta['notes']}",
-                    "findings": [{"type": "good" if meta["score"] >= 85 else "fail", "text": meta["notes"]}],
+                    "summary": f"{meta['name']} validation complete — score {meta['score']}/100. {meta['notes']}",
+                    "findings": [
+                        {"type": "good" if meta["score"] >= 85 else "fail", "text": meta["notes"]}
+                    ],
                     "recommendation": "Maintain standard continuous logging controls." if meta["score"] >= 85 else "Implement strict secondary audit approvals prior to production sync."
                 })
 
         overall_score = int(sum(scores_to_average) / len(scores_to_average)) if scores_to_average else 75
         
-        # Build out clean markdown replica matching your Azure Playground table exactly
+        # Build raw markdown string structure to guarantee a fallback output
         markdown_table = (
             "### Governance Decision\n\n"
             "| Domain | Score | Status |\n"
             "| :--- | :--- | :--- |\n"
         )
         for p in pillar_data_matrix:
-            markdown_table += f"| {p['name']} | {p['score']}/100 | {'🔴 Red' if p['score'] < 70 else '🟢 Green'} |\n"
+            markdown_table += f"| {p['name']} | {p['score']}/100 | {'🟢 PASS' if p['score'] >= 85 else '🔴 FAIL'} |\n"
 
         if overall_score >= 85:
             final_verdict = "APPROVE"
