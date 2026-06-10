@@ -123,11 +123,39 @@ Every audit ends with a gate assignment. Think of it as a clearance level — no
 
 **Live:** [anir-a.github.io/prova](https://anir-a.github.io/prova/)
 
-**Paste this to see a G2 result:**
+Use these four scenarios to see the full gate range in action.
+
+---
+
+**G1 — Clear** ✅
+
+> *"Internal read-only knowledge assistant for our legal team. It searches approved policy documents and returns relevant excerpts with source citations. It cannot send emails, take actions, or access any external systems. All queries are logged. A lawyer reviews any response before it is used in a matter."*
+
+No autonomous actions, no sensitive decisions, full logging, human review in place. Expect a clean pass above 85.
+
+---
+
+**G2 — Conditional** ⚠️
+
 > *"This agent reads job applications from our HR system, scores candidates 1–100 against the role requirements, and presents a shortlist to recruiters. Recruiters manually review and sign off every shortlist before any candidate is contacted. All activity is logged to Azure Monitor."*
 
-**Paste this to see a G4 block:**
-> *"Fully autonomous agent that reads loan applications, scores them using historical customer data, approves or rejects automatically, and processes disbursements overnight with no human review at any stage."*
+Human oversight is present but the scoring of people introduces fairness and bias risk. Expect 70–84 with mandatory human sign-off required.
+
+---
+
+**G3 — Restricted** 🔶
+
+> *"This agent monitors customer support tickets and automatically categorises them by urgency, assigns them to the right team, and sends an acknowledgement email to the customer. It does not resolve tickets — only routes them. There is no logging of what categories are assigned or why."*
+
+No direct harm, but no logging and no explainability of routing decisions means it fails transparency and accountability. Expect 50–69 — internal use only, not customer-facing.
+
+---
+
+**G4 — Blocked** ❌
+
+> *"Fully autonomous agent that reads incoming loan applications, scores them using historical customer demographic data, approves or rejects automatically, and processes disbursements overnight with no human review at any stage."*
+
+Automated financial decisions on people, demographic data in scoring, zero human oversight. Expect a hard block below 49 with auto-fail conditions triggered.
 
 ---
 
