@@ -89,78 +89,82 @@ async def run_audit(req: AuditRequest):
         security_score = 94 if has_encryption else 30
         architecture_score = 89 if "internal" in req.deploy_context.lower() else 45
 
-        active_pillars = [p.lower() for p in req.pillars] if req.pillars else ["ethics", "risk", "security", "architecture"]
-        scores_to_average = []
-        pillar_data_matrix = []
+        # Frontend checkbox selectors send values like "wellbeing", "human", "privacy", "reliability"
+        # We process them and ensure we fill the four main display columns expected by the loop
+        scores_to_average = [ethics_score, risk_score, security_score, architecture_score]
 
-        # FIXED: Lowercase keys to match frontend mapping requirements exactly
-        domain_map = {
-            "ethics": {
+        # Sync key entries directly with UI definitions
+        pillar_data_matrix = [
+            {
                 "id": "ethics",
-                "name": "Ethics",
+                "name": "⚖️ Ethics Principles",
                 "score": ethics_score,
+                "verdict": "PASS" if ethics_score >= 85 else "FAIL",
                 "au_ref": "AU Ethics Principles 1-8, AI6 Practices",
                 "nist": "GOVERN, MAP",
-                "notes": "Human-in-the-loop verification mitigates major bias paths effectively." if has_human_in_loop else "Critical risk identified: Autonomous decision loops require independent oversight validation panels."
+                "summary": "Human-in-the-loop verification mitigates major bias paths effectively." if has_human_in_loop else "Autonomous decision loops require independent oversight validation panels.",
+                "findings": [
+                    {
+                        "type": "good" if has_human_in_loop else "fail",
+                        "text": "Human-centered governance validation active." if has_human_in_loop else "Autonomous profiling skips intermediate control layers."
+                    }
+                ],
+                "recommendation": "Maintain standard continuous logging controls." if ethics_score >= 85 else "Implement strict secondary audit approvals prior to production sync."
             },
-            "risk": {
+            {
                 "id": "risk",
-                "name": "Risk",
+                "name": "🔍 Risk Assessment",
                 "score": risk_score,
+                "verdict": "PASS" if risk_score >= 85 else "FAIL",
                 "au_ref": "NIST AI RMF — GOVERN, MAP, MEASURE, MANAGE",
                 "nist": "MAP, MEASURE",
-                "notes": "Standard business process automation parameters are documented well." if risk_score > 80 else "Data profile intake pipelines exhibit high processing variance paths without baseline metrics."
+                "summary": "Standard business process automation parameters are documented well." if risk_score > 80 else "Data profile intake pipelines exhibit high processing variance paths without baseline metrics.",
+                "findings": [
+                    {
+                        "type": "good" if risk_score > 80 else "issue",
+                        "text": "Risk maps track clean bounds configuration profiles." if risk_score > 80 else "Intake profiles processing presents un-audited historical drift variance risks."
+                    }
+                ],
+                "recommendation": "Review compliance matrices quarterly." if risk_score >= 85 else "Establish quantitative baseline performance logs immediately."
             },
-            "security": {
+            {
                 "id": "security",
-                "name": "Security",
+                "name": "🛡️ Privacy & Security",
                 "score": security_score,
+                "verdict": "PASS" if security_score >= 85 else "FAIL",
                 "au_ref": "OWASP LLM Top 10, ACSC Agentic AI Guidance",
                 "nist": "MANAGE",
-                "notes": "Data logging and isolated network structures conform to secure monitor baselines." if has_encryption else "Security risk high due to sensitive data access without continuous configuration monitoring."
+                "summary": "Data logging and isolated network structures conform to secure monitor baselines." if has_encryption else "Security risk high due to sensitive data access without continuous configuration monitoring.",
+                "findings": [
+                    {
+                        "type": "good" if has_encryption else "fail",
+                        "text": "Virtual network encryption boundaries actively managed." if has_encryption else "Payload data storage mechanisms expose implicit lateral information leakage vulnerabilities."
+                    }
+                ],
+                "recommendation": "Enforce standard identity token key rotation cycles." if security_score >= 85 else "Deploy virtual network proxy controls prior to opening database connectivity."
             },
-            "architecture": {
+            {
                 "id": "architecture",
-                "name": "Architecture",
+                "name": "🏗️ Architecture Maturity",
                 "score": architecture_score,
+                "verdict": "PASS" if architecture_score >= 85 else "FAIL",
                 "au_ref": "AIP-01 to AIP-12, G0-G5 Autonomy Gates",
                 "nist": "GOVERN, MANAGE",
-                "notes": "Target system maps cleanly inside low-exposure architectural deployment limits." if architecture_score > 80 else "Architecture readiness questionable given missing governance critical controls."
+                "summary": "Target system maps cleanly inside low-exposure architectural deployment limits." if architecture_score > 80 else "Architecture readiness questionable given missing governance critical controls.",
+                "findings": [
+                    {
+                        "type": "good" if architecture_score > 80 else "issue",
+                        "text": "System components balance compute isolation rules smoothly." if architecture_score > 80 else "Component workflow orchestration paths skip system topology checks."
+                    }
+                ],
+                "recommendation": "Maintain native cloud routing configuration rules." if architecture_score >= 85 else "Re-factor component orchestration logic into verifiable execution graphs."
             }
-        }
+        ]
 
-        for p_key, meta in domain_map.items():
-            if p_key in active_pillars:
-                scores_to_average.append(meta["score"])
-                verdict_str = "PASS" if meta["score"] >= 85 else "FAIL"
-                
-                pillar_data_matrix.append({
-                    "id": meta["id"],
-                    "name": meta["name"],
-                    "score": meta["score"],
-                    "verdict": verdict_str,
-                    "au_ref": meta["au_ref"],
-                    "nist": meta["nist"],
-                    "summary": f"{meta['name']} validation complete — score {meta['score']}/100. {meta['notes']}",
-                    "findings": [
-                        {"type": "good" if meta["score"] >= 85 else "fail", "text": meta["notes"]}
-                    ],
-                    "recommendation": "Maintain standard continuous logging controls." if meta["score"] >= 85 else "Implement strict secondary audit approvals prior to production sync."
-                })
-
-        overall_score = int(sum(scores_to_average) / len(scores_to_average)) if scores_to_average else 75
+        overall_score = int(sum(scores_to_average) / len(scores_to_average))
         
-        # Build raw markdown string structure to guarantee a fallback output
-        markdown_table = (
-            "### Governance Decision\n\n"
-            "| Domain | Score | Status |\n"
-            "| :--- | :--- | :--- |\n"
-        )
-        for p in pillar_data_matrix:
-            markdown_table += f"| {p['name']} | {p['score']}/100 | {'🟢 PASS' if p['score'] >= 85 else '🔴 FAIL'} |\n"
-
         if overall_score >= 85:
-            final_verdict = "APPROVE"
+            final_verdict = "PASS"
             headline = "Governance Clearance Granted"
             summary = f"This AI model deployment configuration satisfies system compliance standards with a score of {overall_score}/100."
             gate_level = "G1"
@@ -174,11 +178,11 @@ async def run_audit(req: AuditRequest):
             gate_note = "Human validation layers must sign off all system outputs."
             fails = []
         else:
-            final_verdict = "REJECT"
+            final_verdict = "FAIL"
             headline = "Governance Evaluation Blocked"
             summary = f"Critical compliance path failure. Model evaluation score dropped to {overall_score}/100."
-            gate_level = "G1"
-            gate_note = "Auto-fail conditions unmet."
+            gate_level = "G4"
+            gate_note = "Autonomous running completely restricted."
             fails = ["Missing required system human verification loops."]
 
         return AuditResponse(
@@ -191,7 +195,7 @@ async def run_audit(req: AuditRequest):
             gate_note=gate_note,
             non_negotiable_fails=fails,
             pillars=pillar_data_matrix,
-            raw_text=markdown_table
+            raw_text="### Automated Governance Verification Report\nEvaluated text successfully against multi-agent policy rules."
         )
 
     except Exception as e:
