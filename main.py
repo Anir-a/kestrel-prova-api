@@ -271,26 +271,43 @@ async def run_audit(req: AuditRequest):
                     }
                 },
                 input=user_message,
-                stream=False, # ➔ Disabled streaming to cleanly pass large multi-line real paragraphs
+                stream=False, 
                 metadata={"x-ms-debug-mode-enabled": "1"},
             )
 
             # ── Direct Key Extraction Fallbacks ──
             raw_text = ""
             
-            # Primary: Try extracting the standard response model choices content
+            # 1. Primary Check: Try standard choices message extraction
             if hasattr(response, "choices") and response.choices:
-                raw_text = response.choices[0].message.content or ""
+                if response.choices[0].message and response.choices[0].message.content:
+                    raw_text = response.choices[0].message.content
             
-            # Secondary Fallback: If it returns as a custom property dictionary object
-            if not raw_text and isinstance(response, dict):
-                raw_text = (
-                    response.get("properties", {})
-                    .get("outputs", {})
-                    .get("Local.FinalGovernanceDecision", "")
-                )
-            
-            # Final Fallback: Attempt string deduction if text field is exposed
+            # 2. Sequential Step Check: Inspect the inner elements array (used by Foundry multi-agent runs)
+            if not raw_text and hasattr(response, "content") and response.content:
+                if isinstance(response.content, list):
+                    raw_text = "\n".join([block.text for block in response.content if hasattr(block, 'text')])
+                elif isinstance(response.content, str):
+                    raw_text = response.content
+
+            # 3. Object-to-Dict Check: Check dictionary properties if parsed as a raw object
+            if not raw_text:
+                try:
+                    resp_dict = response.to_dict() if hasattr(response, "to_dict") else vars(response)
+                    if isinstance(resp_dict, dict):
+                        raw_text = (
+                            resp_dict.get("properties", {})
+                            .get("outputs", {})
+                            .get("Local.FinalGovernanceDecision", "")
+                        )
+                        if not raw_text:
+                            content_list = resp_dict.get("content", [])
+                            if isinstance(content_list, list) and content_list:
+                                raw_text = "\n".join([item.get("text", "") for item in content_list if isinstance(item, dict)])
+                except Exception:
+                    pass
+
+            # 4. Final Fallback: Check standard string text representation
             if not raw_text and hasattr(response, "text"):
                 raw_text = response.text or ""
 
