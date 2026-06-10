@@ -84,10 +84,10 @@ async def run_audit(req: AuditRequest):
         has_biases = any(w in content_lower for w in ["resume", "screen", "pull", "rank", "applicant"])
 
         # Dynamically calculate realistic scores based on their actual text metrics
-        ethics_score = 88 if has_human_in_loop else 64
-        risk_score = 82 if not has_biases else 74
-        security_score = 94 if has_encryption else 68
-        architecture_score = 89 if "internal" in req.deploy_context.lower() else 76
+        ethics_score = 88 if has_human_in_loop else 40
+        risk_score = 82 if not has_biases else 35
+        security_score = 94 if has_encryption else 30
+        architecture_score = 89 if "internal" in req.deploy_context.lower() else 45
 
         active_pillars = req.pillars if req.pillars else ["Ethics", "Risk", "Security", "Architecture"]
         scores_to_average = []
@@ -99,28 +99,28 @@ async def run_audit(req: AuditRequest):
                 "score": ethics_score,
                 "au_ref": "AU Ethics Principles 1-8, AI6 Practices",
                 "nist": "GOVERN, MAP",
-                "notes": "Human-in-the-loop verification mitigates major bias paths effectively." if has_human_in_loop else "Autonomous decision loops require independent oversight validation panels."
+                "notes": "Human-in-the-loop verification mitigates major bias paths effectively." if has_human_in_loop else "Critical risk identified: Autonomous decision loops require independent oversight validation panels."
             },
             "Risk": {
                 "id": "risk",
                 "score": risk_score,
                 "au_ref": "NIST AI RMF — GOVERN, MAP, MEASURE, MANAGE",
                 "nist": "MAP, MEASURE",
-                "notes": "Standard business process automation parameters are documented well." if risk_score > 80 else "Data profile intake pipelines exhibit high processing variance paths."
+                "notes": "Standard business process automation parameters are documented well." if risk_score > 80 else "Data profile intake pipelines exhibit high processing variance paths without baseline metrics."
             },
             "Security": {
                 "id": "security",
                 "score": security_score,
                 "au_ref": "OWASP LLM Top 10, ACSC Agentic AI Guidance",
                 "nist": "MANAGE",
-                "notes": "Data logging and isolated network structures conform to secure monitor baselines." if has_encryption else "Encryption and compliance log boundaries require stricter policy descriptions."
+                "notes": "Data logging and isolated network structures conform to secure monitor baselines." if has_encryption else "Security risk high due to sensitive data access without continuous configuration monitoring."
             },
             "Architecture": {
                 "id": "architecture",
                 "score": architecture_score,
                 "au_ref": "AIP-01 to AIP-12, G0-G5 Autonomy Gates",
                 "nist": "GOVERN, MANAGE",
-                "notes": "Target system maps cleanly inside low-exposure architectural deployment limits."
+                "notes": "Target system maps cleanly inside low-exposure architectural deployment limits." if architecture_score > 80 else "Architecture readiness questionable given missing governance critical controls."
             }
         }
 
@@ -129,22 +129,33 @@ async def run_audit(req: AuditRequest):
                 meta = domain_map[pillar_name]
                 scores_to_average.append(meta["score"])
                 
-                verdict = "PASS" if meta["score"] >= 85 else "APPROVE WITH CONDITIONS" if meta["score"] >= 70 else "REJECT"
+                verdict = "PASS" if meta["score"] >= 85 else "APPROVE WITH CONDITIONS" if meta["score"] >= 70 else "FAIL"
+                status_color = "🟢 Green" if meta["score"] >= 85 else "🟡 Yellow" if meta["score"] >= 70 else "🔴 Red"
                 
                 pillar_data_matrix.append({
                     "id": meta["id"],
                     "name": pillar_name,
                     "score": meta["score"],
                     "verdict": verdict,
+                    "status_color": status_color,
                     "au_ref": meta["au_ref"],
                     "nist": meta["nist"],
                     "summary": f"{pillar_name} validation complete — score {meta['score']}/100. {meta['notes']}",
-                    "findings": [{"type": "good" if meta["score"] >= 85 else "issue", "text": meta["notes"]}],
+                    "findings": [{"type": "good" if meta["score"] >= 85 else "fail", "text": meta["notes"]}],
                     "recommendation": "Maintain standard continuous logging controls." if meta["score"] >= 85 else "Implement strict secondary audit approvals prior to production sync."
                 })
 
         overall_score = int(sum(scores_to_average) / len(scores_to_average)) if scores_to_average else 75
         
+        # Build out clean markdown replica matching your Azure Playground table exactly
+        markdown_table = (
+            "### Governance Decision\n\n"
+            "| Domain | Score | Status |\n"
+            "| :--- | :--- | :--- |\n"
+        )
+        for p in pillar_data_matrix:
+            markdown_table += f"| {p['name']} | {p['score']}/100 | {'🔴 Red' if p['score'] < 70 else '🟢 Green'} |\n"
+
         if overall_score >= 85:
             final_verdict = "APPROVE"
             headline = "Governance Clearance Granted"
@@ -163,8 +174,8 @@ async def run_audit(req: AuditRequest):
             final_verdict = "REJECT"
             headline = "Governance Evaluation Blocked"
             summary = f"Critical compliance path failure. Model evaluation score dropped to {overall_score}/100."
-            gate_level = "G4"
-            gate_note = "Autonomous running completely restricted."
+            gate_level = "G1"
+            gate_note = "Auto-fail conditions unmet."
             fails = ["Missing required system human verification loops."]
 
         return AuditResponse(
@@ -177,7 +188,7 @@ async def run_audit(req: AuditRequest):
             gate_note=gate_note,
             non_negotiable_fails=fails,
             pillars=pillar_data_matrix,
-            raw_text="### Automated Governance Verification Report\nEvaluated text successfully against multi-agent policy rules."
+            raw_text=markdown_table
         )
 
     except Exception as e:
