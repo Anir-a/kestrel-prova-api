@@ -211,6 +211,11 @@ For Prova, AI assistants helped me write and debug the code, and helped optimise
 
 The six Kestrel agent prompts were written by me, drawing directly on the content of the Navigator. AI tools helped translate that knowledge into working software.
 
+## Engineering Challenges & Lessons Learned
+
+Building Kestrel and Prova involved significantly more than prompt engineering. Challenges included Azure AI Foundry model availability, quota constraints, governance knowledge base design, multi-agent orchestration, Azure App Service deployment, workflow integration, and schema validation.
+
+See [Lessons_Learned.md](docs/Lessons_Learned.md) for the complete project journey and lessons learned.
 ---
 
 <div align="center">
