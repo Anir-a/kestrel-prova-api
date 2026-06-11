@@ -75,6 +75,13 @@ You paste your agent description
 Each agent reasons independently over its own governance domain. The orchestrator collects their findings and makes the final call. This is not one AI asked to do everything — it is six specialists coordinating, the same way a real compliance team would.
 
 ---
+## Demo Video
+
+Watch the Prova / Kestrel demo here:
+
+[Final Presentation – Prova AI Governance Inspector](https://youtu.be/FP_Cljb7eWE)
+
+---
 
 ## The 9 governance pillars
 
