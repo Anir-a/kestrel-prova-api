@@ -45,7 +45,7 @@ Paste a description of your AI agent. Within 30 seconds, six specialist AI agent
 | 🔍 **9 governance pillars** | Every audit covers all nine pillars simultaneously |
 | ⛔ **5 auto-fail conditions** | Triggered regardless of overall score — instant block |
 | 🚦 **Gates G0 – G5** | Six-level autonomy classification — from exempt to prohibited |
-| ⏱ **Under 30 seconds** | Full multi-agent pipeline, structured JSON report |
+| ⏱ **Under 70 seconds** | Full multi-agent pipeline, structured JSON report |
 | 🔒 **Zero hardcoded secrets** | Azure Managed Identity — no passwords anywhere in the code |
 
 ---
