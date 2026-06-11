@@ -212,11 +212,11 @@ Then open `index.html` from the [prova](https://github.com/Anir-a/prova) repo in
 
 ## How this was built
 
-I am not a professional developer. I am someone who knows AI governance deeply — I built the [Australia AI Guidance Navigator](https://anir-a.github.io/Australia-AI-Guidance-Navigator/) to make Australian AI frameworks accessible to everyone, and spent months studying these frameworks before writing a single line of this project.
+I am not a professional developer. I am someone who adovacte AI governance deeply — I built the [Australia AI Guidance Navigator](https://anir-a.github.io/Australia-AI-Guidance-Navigator/) to make Australian AI frameworks accessible to everyone, and spent months studying these frameworks before building this project.
 
 For Prova, AI assistants helped me write and debug the code, and helped optimise the prompts that guide each Kestrel agent. The domain knowledge — which frameworks matter, how they interact, what an actual governance failure looks like in a system prompt — came from that research, distilled into the Guidance Navigator. Prova is essentially that knowledge made into an automated tool: the Navigator explains the frameworks, Prova checks your AI against them.
 
-The six Kestrel agent prompts were written by me, drawing directly on the content of the Navigator. AI tools helped translate that knowledge into working software.
+The six Kestrel agent prompts are drawing directly on the content of the Navigator. AI tools helped translate that knowledge into working software.
 
 ## Engineering Challenges & Lessons Learned
 
